@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 httparse = { version = "1" }
+http = "1.1.0"
