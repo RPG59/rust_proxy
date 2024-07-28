@@ -2,12 +2,11 @@ use std::fmt::{format, Pointer};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    net::TcpStream,
+    net::{TcpListener, TcpSocket, TcpStream},
 };
 
 use http;
-use httparse;
+use httparse::{self, Header};
 use reqwest;
 
 /*
@@ -18,16 +17,20 @@ use reqwest;
            -- proxy_set_header
            -- add_header
            -- proxy_pass
-
 */
 
-async fn make_request<'i>(req: &httparse::Request<'i, 'i>) {
+struct Response<'a> {
+    headers: Vec<httparse::Header<'a>>,
+    body: Vec<u8>,
+}
+
+async fn make_request<'a>(req: &httparse::Request<'a, 'a>) -> Box<Response<'a>> {
     let http_header = format!("{} {} HTTP/1.1", req.method.unwrap(), req.path.unwrap());
     let headers = req
         .headers
         .to_vec()
         .into_iter()
-        .map((|x| format!("{}:{}\r\n", x.name, std::str::from_utf8(x.value).unwrap())))
+        .map(|x| format!("{}:{}\r\n", x.name, std::str::from_utf8(x.value).unwrap()))
         .collect();
 
     let req_str = vec![http_header, headers, "\r\n".to_string()].join("\r\n");
@@ -40,21 +43,50 @@ async fn make_request<'i>(req: &httparse::Request<'i, 'i>) {
 
     // let mut buffer = Vec::new();
     // let recv_size = stream.read_to_end(&mut buffer).await.unwrap();
+
     let mut buffer_raw = [0; 1024 * 8];
     let recv_size = stream.read(&mut buffer_raw).await.unwrap();
     let buffer = &buffer_raw[0..recv_size];
 
     println!("Reveive {} bytes", recv_size);
 
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut req = httparse::Response::new(&mut headers);
+    // let mut headers = Box::new([httparse::EMPTY_HEADER; 64]);
+    let mut headers_slice = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Response::new(&mut headers_slice);
     let body_offset = req.parse(&buffer).unwrap().unwrap();
 
-    println!(
-        "Headers:\n{}",
-        String::from_utf8_lossy(&buffer[0..body_offset])
-    );
-    println!("Body:\n{}", String::from_utf8_lossy(&buffer[body_offset..]));
+    // for header in headers {
+    //     println!(
+    //         "Header: {}:{}",
+    //         header.name,
+    //         String::from_utf8_lossy(header.value)
+    //     )
+    // }
+
+    // println!(
+    //     "Headers:\n{}",
+    //     String::from_utf8_lossy(&buffer[0..body_offset])
+    // );
+
+    let mut body = Vec::with_capacity(recv_size - body_offset);
+    body.clone_from_slice(&buffer[body_offset..]);
+
+    ////aaaaaaaaaaaaaaaaaa
+    let mut headers = Vec::with_capacity(req.headers.len());
+
+    for header in req.headers {
+        let test = header.clone();
+
+        headers.push(test);
+    }
+    ///////
+
+    Box::new(Response {
+        headers: vec![],
+        body,
+    })
+
+    // println!("Body:\n{}", String::from_utf8_lossy(&buffer[body_offset..]));
 }
 
 #[tokio::main]
@@ -105,7 +137,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // println!("Raw {}", String::from_utf8_lossy(data_buffer));
             // println!("Body {}", String::from_utf8_lossy(&buf[body_offset..n]));
 
-            let res_body = make_request(&req).await;
+            let http_header = format!("{} {} HTTP/1.1", req.method.unwrap(), req.path.unwrap());
+            let headers = req
+                .headers
+                .to_vec()
+                .into_iter()
+                .map(|x| format!("{}:{}\r\n", x.name, std::str::from_utf8(x.value).unwrap()))
+                .collect();
+
+            let req_str = vec![http_header, headers, "\r\n".to_string()].join("\r\n");
+
+            println!("HTTP Request String:\n{}", req_str);
+
+            let res_val = TcpStream::connect("127.0.0.1:3000").await;
+
+            if res_val.is_err() {
+                let error = res_val.err().unwrap();
+
+                panic!("Failed to connect to :3000, Error: {}", error);
+            }
+
+            let mut req_stream: TcpStream = res_val.unwrap();
+
+            req_stream.write_all(req_str.as_bytes()).await.unwrap();
+
+            // let mut buffer = Vec::new();
+            // let recv_size = stream.read_to_end(&mut buffer).await.unwrap();
+
+            let mut buffer_raw = [0; 1024 * 8];
+            let recv_size = req_stream.read(&mut buffer_raw).await.unwrap();
+            let buffer = &buffer_raw[0..recv_size];
+
+            println!("Reveive {} bytes", recv_size);
+
+            let mut headers_slice = [httparse::EMPTY_HEADER; 64];
+            let mut response = httparse::Response::new(&mut headers_slice);
+            let body_offset = response.parse(&buffer).unwrap().unwrap();
+            let body = &buffer[body_offset..];
+
+            let result_http_header = format!(
+                "HTTP/1.1 {} {}",
+                response.code.unwrap(),
+                response.reason.unwrap(),
+            );
+
+            let result_headers: String = response
+                .headers
+                .to_vec()
+                .into_iter()
+                .map(|x| format!("{}:{}\r\n", x.name, std::str::from_utf8(x.value).unwrap()))
+                .collect();
+
+            let result_str = vec![
+                result_http_header,
+                result_headers,
+                String::from_utf8_lossy(body).to_string(),
+            ]
+            .join("\r\n");
+
+            let response_opt = stream.write_all(result_str.as_bytes()).await;
+
+            if response_opt.is_err() {
+                panic!(
+                    "Failed to send data to receiver, Error: {}",
+                    response_opt.err().unwrap()
+                );
+            }
+
+            response_opt.unwrap();
 
             // let request = http::Request::builder()
             //     .uri("127.0.0.1:3000")
@@ -121,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // make_request(&req).await;
 
-            // println!("DATA {}", String::from_utf8_lossy(&b1));
+            // println!("DATA {}", response.reason.unwrap());
 
             // stream.write_all(&b1);
         }
